@@ -1,0 +1,141 @@
+
+============================================================
+ILTS DAILY TRADING BOT RUN (Time: 2026-06-22 14:50:01)
+Mode: LIVE PAPER
+============================================================
+No valid state file found. Initializing new state.
+Fetching QQQM latest price...
+QQQM Spot Price: $303.21 (Bid: $303.17, Ask: $303.24)
+Current Positions: QQQM Shares = 0 | Puts (None) = 0
+Account Cash Balance: $35,000.00
+Fetching VIX from yfinance...
+Current VIX Close: 17.46
+
+=== TRIGGERING MONTHLY ROLL ===
+No old puts to close.
+Target Specifications: Strike Pct = 0.95 (OTM), Expiry = 2026-07-17
+Searching option chain for QQQM expiring near 2026-07-17...
+Found contract: QQQM260717P00290000 (Strike: $290.0, Bid: $3.44, Ask: $3.78)
+Sizing Calculation:
+  Estimated Cash Pool:  $35,000.00
+  Block Cost:           $30,682.00
+  Target Contracts:     1 (representing 100 shares)
+Adjusting QQQM shares by 100 (buy)...
+  [Shares Order] Side: BUY, Qty: 100, Symbol: QQQM (Dry-run: False)
+  Shares order submitted. ID: e9ec79c9-c530-4319-9077-3b1c9061cbf4, Status: OrderStatus.PENDING_NEW
+  Shares order status is: OrderStatus.PARTIALLY_FILLED
+
+[CRITICAL ERROR] Failed to execute shares trade: 100 buy
+Traceback (most recent call last):
+  File "/home/ubuntu/ilts-qqqm/prod/trade_bot.py", line 613, in <module>
+    execute_bot(
+  File "/home/ubuntu/ilts-qqqm/prod/trade_bot.py", line 602, in execute_bot
+    raise e
+  File "/home/ubuntu/ilts-qqqm/prod/trade_bot.py", line 428, in execute_bot
+    raise Exception(f"Failed to execute shares trade: {shares_delta} {shares_order_side.value}")
+Exception: Failed to execute shares trade: 100 buy
+
+============================================================
+ILTS DAILY TRADING BOT RUN (Time: 2026-06-23 14:50:02)
+Mode: LIVE PAPER
+============================================================
+Loaded state from /home/ubuntu/ilts-qqqm/prod/bot_state.json
+Fetching QQQM latest price...
+QQQM Spot Price: $294.09 (Bid: $294.06, Ask: $294.12)
+Current Positions: QQQM Shares = 100 | Puts (QQQM260717P00290000) = 1
+Account Cash Balance: $4,291.33
+Fetching VIX from yfinance...
+Current VIX Close: 19.38
+
+=== DAILY CRASH REINVESTMENT CHECK ===
+Active Option Symbol:  QQQM260717P00290000
+Initial Premium Paid:  $3.80
+Active Strike:         $290.00
+Current Option Price:  $6.87 (Mid-price)
+Current Put Intrinsic: $0.00
+Premium Gain Multiplier: 0.00x (Crash Threshold: 3.0x)
+Hedge ratio is normal. No crash reinvestment needed today.
+
+============================================================
+ILTS DAILY TRADING BOT RUN (Time: 2026-06-24 14:50:02)
+Mode: LIVE PAPER
+============================================================
+Loaded state from /home/ubuntu/ilts-qqqm/prod/bot_state.json
+Fetching QQQM latest price...
+QQQM Spot Price: $287.15 (Bid: $282.69, Ask: $291.61)
+Current Positions: QQQM Shares = 100 | Puts (QQQM260717P00290000) = 1
+Account Cash Balance: $4,291.33
+Fetching VIX from yfinance...
+Current VIX Close: 20.01
+
+=== DAILY CRASH REINVESTMENT CHECK ===
+Active Option Symbol:  QQQM260717P00290000
+Initial Premium Paid:  $3.80
+Active Strike:         $290.00
+Current Option Price:  $8.03 (Mid-price)
+Current Put Intrinsic: $2.85
+Premium Gain Multiplier: 0.75x (Crash Threshold: 3.0x)
+Hedge ratio is normal. No crash reinvestment needed today.
+
+============================================================
+ILTS DAILY TRADING BOT RUN (Time: 2026-06-25 14:50:02)
+Mode: LIVE PAPER
+============================================================
+Loaded state from /home/ubuntu/ilts-qqqm/prod/bot_state.json
+Fetching QQQM latest price...
+QQQM Spot Price: $293.86 (Bid: $293.82, Ask: $293.89)
+Current Positions: QQQM Shares = 100 | Puts (QQQM260717P00290000) = 1
+Account Cash Balance: $4,291.33
+Fetching VIX from yfinance...
+Current VIX Close: 19.14
+
+=== DAILY CRASH REINVESTMENT CHECK ===
+Active Option Symbol:  QQQM260717P00290000
+Initial Premium Paid:  $3.80
+Active Strike:         $290.00
+Current Option Price:  $6.28 (Mid-price)
+Current Put Intrinsic: $0.00
+Premium Gain Multiplier: 0.00x (Crash Threshold: 3.0x)
+Hedge ratio is normal. No crash reinvestment needed today.
+
+============================================================
+ILTS DAILY TRADING BOT RUN (Time: 2026-06-26 14:50:02)
+Mode: LIVE PAPER
+============================================================
+Loaded state from /home/ubuntu/ilts-qqqm/prod/bot_state.json
+Fetching QQQM latest price...
+QQQM Spot Price: $292.13 (Bid: $292.08, Ask: $292.19)
+Current Positions: QQQM Shares = 100 | Puts (QQQM260717P00290000) = 1
+Account Cash Balance: $4,291.33
+Fetching VIX from yfinance...
+Current VIX Close: 18.72
+
+=== DAILY CRASH REINVESTMENT CHECK ===
+Active Option Symbol:  QQQM260717P00290000
+Initial Premium Paid:  $3.80
+Active Strike:         $290.00
+Current Option Price:  $6.50 (Mid-price)
+Current Put Intrinsic: $0.00
+Premium Gain Multiplier: 0.00x (Crash Threshold: 3.0x)
+Hedge ratio is normal. No crash reinvestment needed today.
+
+============================================================
+ILTS DAILY TRADING BOT RUN (Time: 2026-06-29 14:50:02)
+Mode: LIVE PAPER
+============================================================
+Loaded state from /home/ubuntu/ilts-qqqm/prod/bot_state.json
+Fetching QQQM latest price...
+QQQM Spot Price: $297.57 (Bid: $297.52, Ask: $297.62)
+Current Positions: QQQM Shares = 100 | Puts (QQQM260717P00290000) = 1
+Account Cash Balance: $4,291.33
+Fetching VIX from yfinance...
+Current VIX Close: 17.62
+
+=== DAILY CRASH REINVESTMENT CHECK ===
+Active Option Symbol:  QQQM260717P00290000
+Initial Premium Paid:  $3.80
+Active Strike:         $290.00
+Current Option Price:  $4.11 (Mid-price)
+Current Put Intrinsic: $0.00
+Premium Gain Multiplier: 0.00x (Crash Threshold: 3.0x)
+Hedge ratio is normal. No crash reinvestment needed today.
