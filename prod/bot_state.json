@@ -1,8 +1,8 @@
 {
-  "last_roll_month": 6,
-  "active_strike": 290.0,
-  "active_expiry": "2026-07-17",
-  "initial_premium_paid": 3.8,
-  "option_symbol": "QQQM260717P00290000",
+  "last_roll_month": 7,
+  "active_strike": 295.0,
+  "active_expiry": "2026-08-21",
+  "initial_premium_paid": 12.4,
+  "option_symbol": "QQQM260821P00295000",
   "crash_reinvestment_triggered": false
 }

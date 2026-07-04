@@ -15,10 +15,10 @@ import alpaca_config as config
 import requests
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
-from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus, PositionIntent
+from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest, GetOptionContractsRequest, ReplaceOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderStatus, PositionIntent, ContractType, AssetStatus
 from alpaca.data.historical import OptionHistoricalDataClient, StockHistoricalDataClient
-from alpaca.data.requests import OptionChainRequest, OptionLatestQuoteRequest, StockLatestQuoteRequest
+from alpaca.data.requests import OptionLatestQuoteRequest, StockLatestQuoteRequest
 
 # --- State File Path ---
 STATE_FILE_PATH = os.path.join(current_dir, "bot_state.json")
@@ -102,142 +102,163 @@ def get_strike_pct(vix):
     return 1.0  # ATM (user-elected Jun 25)
 
 # --- Helper: Option Chain Search (Workaround) ---
-def find_active_put_contract(data_client, underlying, target_expiry, target_strike):
-    """Query options chain for QQQM, parse symbols, and find the closest PUT contract."""
-    print(f"Searching option chain for {underlying} expiring near {target_expiry}...")
-    req = OptionChainRequest(underlying_symbol=underlying)
-    chain = data_client.get_option_chain(req)
+def find_active_put_contract(trading_client, underlying, target_expiry, target_strike):
+    """Query Alpaca option contracts API to find the closest PUT contract for target expiry and strike."""
+    print(f"Searching option contracts for {underlying} expiring near {target_expiry}...")
+    req = GetOptionContractsRequest(
+        underlying_symbols=[underlying],
+        status=AssetStatus.ACTIVE,
+        expiration_date=target_expiry,
+        type=ContractType.PUT
+    )
+    contracts = trading_client.get_option_contracts(req)
     
-    parsed_options = []
-    for sym in chain.keys():
-        m = re.match(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$", sym)
-        if not m:
-            continue
-        und, expiry_str, op_type, strike_str = m.groups()
-        if und != underlying or op_type != "P":
-            continue
-        try:
-            expiry = datetime.datetime.strptime(expiry_str, "%y%m%d").date()
-            strike = float(strike_str) / 1000.0
-            parsed_options.append({
-                "symbol": sym,
-                "expiry": expiry,
-                "strike": strike
-            })
-        except Exception:
-            continue
-            
-    # Filter for target expiry
-    expiry_puts = [o for o in parsed_options if o["expiry"] == target_expiry]
-    
-    # Fallback to nearest expiry (within 2 days) if exact match not found
-    if not expiry_puts:
-        expiry_puts = [o for o in parsed_options if abs((o["expiry"] - target_expiry).days) <= 2]
-        
-    if not expiry_puts:
-        print(f"[Error] No active put contracts found for {underlying} expiring near {target_expiry}")
+    if not contracts or not contracts.option_contracts:
+        print(f"[Error] No active put contracts found for {underlying} expiring on {target_expiry}")
         return None, None, (0.0, 0.0)
-        
+    
     # Find closest strike
-    closest = min(expiry_puts, key=lambda x: abs(x["strike"] - target_strike))
+    closest = min(contracts.option_contracts, key=lambda c: abs(float(c.strike_price) - target_strike))
+    strike = float(closest.strike_price)
     
-    # Get quote details from chain snapshot
-    snapshot = chain[closest["symbol"]]
-    quote = snapshot.latest_quote
-    bid = float(quote.bid_price) if (quote and quote.bid_price is not None) else 0.0
-    ask = float(quote.ask_price) if (quote and quote.ask_price is not None) else 0.0
-    
-    print(f"Found contract: {closest['symbol']} (Strike: ${closest['strike']}, Bid: ${bid:.2f}, Ask: ${ask:.2f})")
-    return closest["symbol"], closest["strike"], (bid, ask)
+    # We don't get quotes from contracts API, so return 0s — quotes fetched live during chasing
+    print(f"Found contract: {closest.symbol} (Strike: ${strike:.2f})")
+    return closest.symbol, strike, (0.0, 0.0)
 
 # --- Helper: Submit Option Orders with Chasing ---
 def submit_option_order_with_chasing(trading_client, data_client, symbol, qty, side, max_attempts=3, dry_run=False):
     qty = int(qty)
     print(f"  [Option Order] Side: {side.value.upper()}, Qty: {qty}, Symbol: {symbol} (Dry-run: {dry_run})")
     if dry_run:
-        return 1.0 # return dummy avg price in dry-run
-        
-    attempt = 1
+        return 1.0
+
+    from alpaca.trading.requests import ReplaceOrderRequest
+
+    # Cancel any existing stale orders for this symbol first
+    existing = trading_client.get_orders()
+    for o in existing:
+        if o.symbol == symbol:
+            try:
+                trading_client.cancel_order_by_id(o.id)
+                print(f"  Cancelled stale order {o.id}")
+            except Exception:
+                pass
+
+    now = datetime.datetime.now()
+    market_close = now.replace(hour=15, minute=0, second=0, microsecond=0)
+    if now >= market_close:
+        print("  Market already closed. Cannot trade.")
+        return None
+
+    total_seconds = (market_close - now).total_seconds()
+    segment_seconds = total_seconds / max_attempts
+    print(f"  Market closes in {total_seconds:.0f}s. {max_attempts} segments of {segment_seconds:.0f}s each.")
+
+    spread_fractions = {1: 0.30, 2: 0.50, 3: 1.00}
+    check_interval = 10
     order = None
-    
-    while attempt <= max_attempts:
+
+    for attempt in range(1, max_attempts + 1):
         # Fetch latest quotes
         req_quote = OptionLatestQuoteRequest(symbol_or_symbols=symbol)
         try:
             res_quote = data_client.get_option_latest_quote(req_quote)
             quote = res_quote.get(symbol)
         except Exception as e:
-            print(f"  [Attempt {attempt}] Failed to fetch quote: {e}. Retrying in 5 seconds...")
-            time.sleep(5)
-            attempt += 1
-            continue
-            
-        if not quote or quote.bid_price == 0 or quote.ask_price == 0:
-            print(f"  [Attempt {attempt}] No valid bid/ask quotes available. Retrying in 5 seconds...")
-            time.sleep(5)
-            attempt += 1
-            continue
-            
-        # Determine limit price
-        if attempt < max_attempts:
-            # Mid-price limit order
-            limit_price = round((quote.bid_price + quote.ask_price) / 2.0, 2)
-            print(f"  [Attempt {attempt}] Placing limit order at mid-price: ${limit_price:.2f} (Bid: ${quote.bid_price:.2f}, Ask: ${quote.ask_price:.2f})")
-        else:
-            # Final attempt: cross the spread + small buffer to guarantee fill
-            buffer = 0.05
-            limit_price = (quote.ask_price + buffer) if side == OrderSide.BUY else (quote.bid_price - buffer)
-            limit_price = round(limit_price, 2)
-            print(f"  [Attempt {attempt}] Final attempt: crossing the spread + ${buffer:.2f} buffer. Limit price: ${limit_price:.2f} (Bid: ${quote.bid_price:.2f}, Ask: ${quote.ask_price:.2f})")
-            
-        # Create order request
-        order_req = LimitOrderRequest(
-            symbol=symbol,
-            qty=qty,
-            side=side,
-            limit_price=limit_price,
-            time_in_force=TimeInForce.DAY,
-            position_intent=PositionIntent.BUY_TO_OPEN if side == OrderSide.BUY else PositionIntent.SELL_TO_CLOSE
-        )
-        
-        # Cancel previous order if active
-        if order:
-            try:
-                print(f"  Cancelling previous unfilled order {order.id}...")
-                trading_client.cancel_order_by_id(order.id)
-                time.sleep(2)
-            except Exception as e:
-                print(f"  Failed to cancel order: {e}")
-                
-        # Submit new order
-        try:
-            order = trading_client.submit_order(order_req)
-            print(f"  Order submitted. ID: {order.id}, Status: {order.status}")
-        except Exception as e:
-            print(f"  [Error] Failed to submit order: {e}")
-            attempt += 1
-            continue
-            
-        # Wait and check if filled
-        wait_time = 20
-        print(f"  Waiting {wait_time} seconds for fill...")
-        time.sleep(wait_time)
-        
-        # Retrieve updated order status
-        try:
-            updated_order = trading_client.get_order_by_id(order.id)
-            if updated_order.status == OrderStatus.FILLED:
-                avg_price = float(updated_order.filled_avg_price)
-                print(f"  Order FILLED successfully at average fill price: ${avg_price:.2f}")
-                return avg_price
+            print(f"  [Segment {attempt}] Failed to fetch quote: {e}")
+            if attempt == 1:
+                time.sleep(3)
+                continue
             else:
-                print(f"  Order status: {updated_order.status} (unfilled)")
-        except Exception as e:
-            print(f"  Failed to get order status: {e}")
-            
-        attempt += 1
-        
-    print(f"  [Error] Failed to fill option order after {max_attempts} attempts.")
+                break
+
+        if not quote or quote.bid_price is None or quote.ask_price is None or quote.bid_price == 0 or quote.ask_price == 0:
+            print(f"  [Segment {attempt}] No valid bid/ask quotes.")
+            if attempt == 1:
+                time.sleep(3)
+                continue
+            else:
+                break
+
+        spread = quote.ask_price - quote.bid_price
+        frac = spread_fractions[attempt]
+        if side == OrderSide.BUY:
+            limit_price = round(quote.bid_price + frac * spread, 2)
+        else:
+            limit_price = round(quote.ask_price - frac * spread, 2)
+        print(f"  [Segment {attempt}/{max_attempts}] bid=${quote.bid_price:.2f} ask=${quote.ask_price:.2f} spread=${spread:.2f} → price at {frac:.0%} = ${limit_price:.2f}")
+
+        if order:
+            # Use replace_order_by_id to update price (no gap)
+            try:
+                replace_req = ReplaceOrderRequest(limit_price=limit_price)
+                order = trading_client.replace_order_by_id(order.id, replace_req)
+                print(f"  Replaced order {order.id} to ${limit_price:.2f}")
+            except Exception as e:
+                print(f"  Replace failed: {e}. Submitting new order.")
+                try:
+                    trading_client.cancel_order_by_id(order.id)
+                except Exception:
+                    pass
+                order = None
+        else:
+            # First submission: also check for any existing orders for this symbol and cancel them
+            try:
+                for o in trading_client.get_orders():
+                    if o.symbol == symbol and o.id != getattr(order, 'id', None):
+                        trading_client.cancel_order_by_id(o.id)
+            except Exception:
+                pass
+
+        if not order:
+            order_req = LimitOrderRequest(
+                symbol=symbol, qty=qty, side=side,
+                limit_price=limit_price, time_in_force=TimeInForce.DAY,
+                position_intent=PositionIntent.BUY_TO_OPEN if side == OrderSide.BUY else PositionIntent.SELL_TO_CLOSE
+            )
+            try:
+                order = trading_client.submit_order(order_req)
+                print(f"  Order submitted. ID: {order.id}, Status: {order.status}")
+            except Exception as e:
+                print(f"  [Error] Failed to submit order: {e}")
+                order = None
+                continue
+
+        # Wait until end of segment, checking periodically
+        segment_end = now + datetime.timedelta(seconds=attempt * segment_seconds)
+        while True:
+            remaining = (segment_end - datetime.datetime.now()).total_seconds()
+            if remaining <= 0:
+                break
+            time.sleep(min(check_interval, remaining))
+            try:
+                updated_order = trading_client.get_order_by_id(order.id)
+                if updated_order.status == OrderStatus.FILLED:
+                    avg_price = float(updated_order.filled_avg_price)
+                    print(f"  Order FILLED at ${avg_price:.2f}")
+                    return avg_price
+            except Exception as e:
+                print(f"  Failed to check order status: {e}")
+
+        print(f"  Segment {attempt} ended — order still unfilled.")
+
+    # Final check + cleanup
+    if order:
+        try:
+            final_check = trading_client.get_order_by_id(order.id)
+            if final_check.status == OrderStatus.FILLED:
+                avg_price = float(final_check.filled_avg_price)
+                print(f"  Order FILLED at ${avg_price:.2f}")
+                return avg_price
+        except Exception:
+            pass
+        try:
+            trading_client.cancel_order_by_id(order.id)
+            print(f"  Cancelled leftover order {order.id}")
+        except Exception:
+            pass
+
+    print(f"  [Error] Failed to fill option order after {max_attempts} segments.")
     return None
 
 # --- Helper: Submit Shares Orders ---
@@ -258,22 +279,37 @@ def submit_shares_order(trading_client, symbol, qty, side, dry_run=False):
     try:
         order = trading_client.submit_order(order_req)
         print(f"  Shares order submitted. ID: {order.id}, Status: {order.status}")
-        max_wait = 30
+        max_wait = 60
         waited = 0
+        total_filled = 0
         while waited < max_wait:
             time.sleep(3)
             waited += 3
             filled_order = trading_client.get_order_by_id(order.id)
             if filled_order.status == OrderStatus.FILLED:
                 filled_qty = int(filled_order.filled_qty)
-                print(f"  Shares order FILLED: {filled_qty} shares @ avg ${filled_order.filled_avg_price}")
+                filled_avg = float(filled_order.filled_avg_price)
+                print(f"  Shares order FILLED: {filled_qty} shares @ avg ${filled_avg:.2f}")
                 return True
             elif filled_order.status in (OrderStatus.CANCELED, OrderStatus.REJECTED):
+                if int(filled_order.filled_qty) > 0:
+                    filled_qty = int(filled_order.filled_qty)
+                    filled_avg = float(filled_order.filled_avg_price)
+                    print(f"  Shares order partially filled then {filled_order.status}: {filled_qty} shares @ ${filled_avg:.2f}")
+                    return True
                 print(f"  Shares order {filled_order.status}. Failed.")
                 return False
             else:
-                print(f"  Shares order status: {filled_order.status} ({waited}s elapsed)...")
-        print(f"  [Error] Shares order still {filled_order.status} after {max_wait}s.")
+                filled_so_far = int(filled_order.filled_qty) if hasattr(filled_order, 'filled_qty') and filled_order.filled_qty else 0
+                if filled_so_far > total_filled:
+                    total_filled = filled_so_far
+                    print(f"  Shares order: {filled_so_far}/{qty} filled ({waited}s elapsed)...")
+                else:
+                    print(f"  Shares order status: {filled_order.status} ({waited}s elapsed)...")
+        print(f"  [Error] Shares order still partial after {max_wait}s (filled: {total_filled}/{qty}).")
+        # If partially filled, count it as success
+        if total_filled > 0:
+            return True
         return False
     except Exception as e:
         print(f"  [Error] Failed to submit shares order: {e}")
@@ -318,6 +354,17 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
             send_discord_alert(f"💤 **[ILTS Bot]** Run skipped at {now_str} (Market is closed).")
             return
             
+        # Clean up any stale orders from previous failed runs (only our symbols)
+        try:
+            stale_orders = trading_client.get_orders()
+            qqqm_symbols = [config.TARGET_SYMBOL]
+            for o in stale_orders:
+                if any(s in o.symbol for s in qqqm_symbols):
+                    print(f"  Cleaning up stale order: {o.id} {o.symbol} {o.side} limit=${o.limit_price}")
+                    trading_client.cancel_order_by_id(o.id)
+        except Exception as e:
+            print(f"  [Warning] Failed to clean up stale orders: {e}")
+            
         # Load current bot state
         state = load_state()
         
@@ -336,21 +383,37 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
         active_puts_pos = None
         shares_cost_basis = 0.0
         shares_market_value = 0.0
-        option_market_value = 0.0
-        option_cost_basis = 0.0
+        tracked_option_cost_basis = 0.0
+        tracked_option_market_value = 0.0
+        all_option_positions = []  # ALL option positions (tracked or not)
+        extra_option_positions = []  # untracked options for warning
+        tracked_option_symbol = state.get("option_symbol")
         
         for pos in positions:
             if pos.symbol == config.TARGET_SYMBOL:
                 shares_held = int(float(pos.qty))
                 shares_cost_basis = float(pos.cost_basis)
                 shares_market_value = float(pos.market_value)
-            elif pos.symbol == state.get("option_symbol"):
-                puts_held = int(float(pos.qty))
-                active_puts_pos = pos
-                option_cost_basis = float(pos.cost_basis)
-                option_market_value = float(pos.market_value)
-                
-        print(f"Current Positions: QQQM Shares = {shares_held} | Puts ({state.get('option_symbol')}) = {puts_held}")
+            elif "QQQM" in pos.symbol and "P" in pos.symbol:
+                all_option_positions.append(pos)
+                if tracked_option_symbol and pos.symbol == tracked_option_symbol:
+                    puts_held = int(float(pos.qty))
+                    active_puts_pos = pos
+                    tracked_option_cost_basis = float(pos.cost_basis)
+                    tracked_option_market_value = float(pos.market_value)
+                else:
+                    extra_option_positions.append(pos)
+        
+        # Total portfolio metrics include ALL positions (shares + all options)
+        option_market_value = sum(float(p.market_value) for p in all_option_positions)
+        option_cost_basis = sum(float(p.cost_basis) for p in all_option_positions)
+        print(f"Current Positions: QQQM Shares = {shares_held} | All puts = {[p.symbol for p in all_option_positions]} | Tracked ({state.get('option_symbol')}) = {puts_held}")
+        
+        if extra_option_positions:
+            for ep in extra_option_positions:
+                pl = float(ep.unrealized_pl)
+                print(f"[WARNING] Untracked option position: {ep.symbol} qty={ep.qty} cost=${float(ep.cost_basis):.2f} P&L=${pl:+.2f}")
+                report_details.append(f"⚠️ Untracked: `{ep.symbol}` qty={ep.qty} P&L=${pl:+.2f}")
         
         # Get account cash
         account = trading_client.get_account()
@@ -408,13 +471,21 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
             
             # 3. Find closest PUT contract on Alpaca
             new_symbol, new_strike, new_quote = find_active_put_contract(
-                option_data_client, config.TARGET_SYMBOL, target_expiry, target_strike
+                trading_client, config.TARGET_SYMBOL, target_expiry, target_strike
             )
             
             if not new_symbol:
                 raise Exception("Failed to find a matching options contract for monthly roll.")
                 
-            bid, ask = new_quote
+            # Fetch live quote for sizing
+            try:
+                q_req = OptionLatestQuoteRequest(symbol_or_symbols=new_symbol)
+                q_res = option_data_client.get_option_latest_quote(q_req)
+                opt_q = q_res.get(new_symbol)
+                bid = float(opt_q.bid_price) if (opt_q and opt_q.bid_price is not None) else 0.0
+                ask = float(opt_q.ask_price) if (opt_q and opt_q.ask_price is not None) else 0.0
+            except Exception:
+                bid = ask = 0.0
             new_put_mid_price = round((bid + ask) / 2.0, 2) if (bid > 0 and ask > 0) else 1.0
             
             # 4. Cash calculations for share sizing
@@ -460,7 +531,7 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
             state["option_symbol"] = new_symbol
             state["crash_reinvestment_triggered"] = False
             
-            save_state(state)
+            save_state(state) if not dry_run else print("  [Dry-run] State not saved.")
             print("Monthly roll completed successfully!")
             
         # --- DAILY MONITORING (CRASH CHECK) ---
@@ -513,6 +584,11 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
                     print("\n=== TRIGGERING CRASH REINVESTMENT ===")
                     if force_crash:
                         print("  (Forced crash triggered via flag)")
+                    
+                    # Mark as triggered FIRST so partial failures don't cause share accumulation
+                    state["crash_reinvestment_triggered"] = True
+                    save_state(state) if not dry_run else print("  [Dry-run] State not saved.")
+                    print("  Crash flagged in state — prevents re-entry on subsequent days.")
                         
                     # 1. Close existing put options (sell)
                     old_qty = puts_held
@@ -526,6 +602,7 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
                         if avg_sell_price:
                             old_put_revenue = old_qty * 100.0 * avg_sell_price
                         else:
+                            print("[Warning] Failed to sell puts. Continuing with mid-price estimate.")
                             old_put_revenue = old_qty * 100.0 * opt_price
                     else:
                         print("No puts held in positions.")
@@ -534,7 +611,7 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
                     print("Buying 100 additional shares of QQQM...")
                     success_shares = submit_shares_order(trading_client, config.TARGET_SYMBOL, 100, OrderSide.BUY, dry_run=dry_run)
                     if not success_shares and not dry_run:
-                        raise Exception("Failed to buy 100 additional shares of QQQM during crash reinvestment.")
+                        print("[Warning] Share purchase may have partially failed.")
                     
                     # 3. Find and buy new puts to cover the new total shares count
                     new_contracts = puts_held + 1
@@ -544,34 +621,38 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
                     # Calculate new strike based on today's spot and VIX
                     strike_pct = get_strike_pct(vix)
                     target_strike = spot * strike_pct
-                    target_expiry = datetime.datetime.strptime(active_expiry_str, "%Y-%m-%d").date()
+                    target_expiry = datetime.datetime.strptime(active_expiry_str, "%Y-%m-%d").date() if active_expiry_str else get_target_expiry(today)
                     
                     new_symbol, new_strike, new_quote = find_active_put_contract(
-                        option_data_client, config.TARGET_SYMBOL, target_expiry, target_strike
+                        trading_client, config.TARGET_SYMBOL, target_expiry, target_strike
                     )
                     
                     if not new_symbol:
-                        raise Exception("Failed to find a matching options contract for crash reinvestment puts.")
+                        print("[Warning] Failed to find option contract for crash reinvestment. State already saved — will retry order.")
+                    else:
+                        try:
+                            q_req = OptionLatestQuoteRequest(symbol_or_symbols=new_symbol)
+                            q_res = option_data_client.get_option_latest_quote(q_req)
+                            opt_q = q_res.get(new_symbol)
+                            bid = float(opt_q.bid_price) if (opt_q and opt_q.bid_price is not None) else 0.0
+                            ask = float(opt_q.ask_price) if (opt_q and opt_q.ask_price is not None) else 0.0
+                        except Exception:
+                            bid = ask = 0.0
+                        new_put_mid_price = round((bid + ask) / 2.0, 2) if (bid > 0 and ask > 0) else 1.0
                         
-                    bid, ask = new_quote
-                    new_put_mid_price = round((bid + ask) / 2.0, 2) if (bid > 0 and ask > 0) else 1.0
-                    
-                    print(f"Buying new puts to cover total shares ({new_contracts * 100} shares): {new_contracts} contracts of {new_symbol}...")
-                    avg_buy_price = submit_option_order_with_chasing(
-                        trading_client, option_data_client, new_symbol, new_contracts, OrderSide.BUY, dry_run=dry_run
-                    )
-                    
-                    if avg_buy_price is None and not dry_run:
-                        raise Exception(f"Failed to buy new puts for crash reinvestment: {new_contracts} contracts of {new_symbol}")
+                        print(f"Buying new puts to cover total shares ({new_contracts * 100} shares): {new_contracts} contracts of {new_symbol}...")
+                        avg_buy_price = submit_option_order_with_chasing(
+                            trading_client, option_data_client, new_symbol, new_contracts, OrderSide.BUY, dry_run=dry_run
+                        )
                         
-                    # 4. Update State
-                    state["active_strike"] = new_strike
-                    state["initial_premium_paid"] = avg_buy_price if avg_buy_price else new_put_mid_price
-                    state["option_symbol"] = new_symbol
-                    state["crash_reinvestment_triggered"] = True
-                    
-                    save_state(state)
-                    print("Crash reinvestment completed successfully!")
+                        if avg_buy_price is not None or dry_run:
+                            # 4. Update State with new option details
+                            state["active_strike"] = new_strike
+                            state["initial_premium_paid"] = avg_buy_price if avg_buy_price else new_put_mid_price
+                            state["option_symbol"] = new_symbol
+                            
+                    save_state(state) if not dry_run else print("  [Dry-run] State not saved.")
+                    print("Crash reinvestment completed! (Any order failures will retry next run with fresh quotes.)")
                 else:
                     status_summary = "Hedge Value Normal"
                     print("Hedge ratio is normal. No crash reinvestment needed today.")
@@ -583,14 +664,16 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
         # Compute portfolio metrics
         portfolio_value = cash + shares_market_value + option_market_value
         total_cost_basis = shares_cost_basis + option_cost_basis
-        total_invested = cash + total_cost_basis  # total money put in
+        total_invested = cash + total_cost_basis  # cost basis of current positions + cash
         
         shares_pl = shares_market_value - shares_cost_basis
         option_pl = option_market_value - option_cost_basis
         net_pl = shares_pl + option_pl
         
         shares_pl_pct = (shares_pl / shares_cost_basis * 100) if shares_cost_basis else 0
-        opt_price_mid = (option_market_value / (puts_held * 100)) if puts_held > 0 else 0.0
+        tracked_opt_price_mid = (tracked_option_market_value / (puts_held * 100)) if puts_held > 0 else (
+            state.get('initial_premium_paid', 0) if state.get('option_symbol') else 0.0
+        )
         
         report = []
         report.append(f"{emoji} **ILTS Daily Trading Report ({'DRY-RUN' if dry_run else 'LIVE PAPER'})**")
@@ -614,15 +697,16 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
         report.append("")
         
         # --- Options Section ---
+        tracked_opt_pl = tracked_option_market_value - tracked_option_cost_basis if tracked_option_cost_basis else 0
         report.append("**🛡️ PROTECTIVE PUT**")
         report.append(f"  Contract: `{state.get('option_symbol', 'N/A')}`")
         report.append(f"  Strike: **${state.get('active_strike', 0):.1f}** | Expiry: **{state.get('active_expiry', 'N/A')}**")
-        report.append(f"  Current Price: **${opt_price_mid:.2f}**")
-        report.append(f"  Market Value: ${option_market_value:,.2f}")
+        report.append(f"  Current Price: **${tracked_opt_price_mid:.2f}**")
+        report.append(f"  Market Value: ${tracked_option_market_value:,.2f}")
         report.append(f"  Premium Paid: ${state.get('initial_premium_paid', 0):.2f}")
-        opt_pl_str = f"**${option_pl:+,.2f}**"
-        if option_cost_basis:
-            opt_pl_str += f" ({option_pl/option_cost_basis*100:+.2f}%)"
+        opt_pl_str = f"**${tracked_opt_pl:+,.2f}**"
+        if tracked_option_cost_basis:
+            opt_pl_str += f" ({tracked_opt_pl/tracked_option_cost_basis*100:+.2f}%)"
         report.append(f"  Option P&L: {opt_pl_str}")
         
         # Intrinsic value & hedge check
@@ -636,7 +720,6 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
         # --- Net P&L ---
         port_pl_pct = (net_pl / total_invested * 100) if total_invested else 0
         report.append("**💵 NET PERFORMANCE**")
-        report.append(f"  Total Invested: ${total_invested:,.2f}")
         report.append(f"  **Net P&L: ${net_pl:+,.2f}** ({port_pl_pct:+.2f}%)")
         report.append(f"  **Portfolio Value: ${portfolio_value:,.2f}**")
         report.append("")
