@@ -105,24 +105,33 @@ def get_strike_pct(vix):
 def find_active_put_contract(trading_client, underlying, target_expiry, target_strike):
     """Query Alpaca option contracts API to find the closest PUT contract for target expiry and strike."""
     print(f"Searching option contracts for {underlying} expiring near {target_expiry}...")
-    req = GetOptionContractsRequest(
-        underlying_symbols=[underlying],
-        status=AssetStatus.ACTIVE,
-        expiration_date=target_expiry,
-        type=ContractType.PUT
-    )
-    contracts = trading_client.get_option_contracts(req)
+    
+    # Try exact expiry first, then widen by ±2 days
+    for offset in [0, 1, -1, 2, -2]:
+        search_date = target_expiry + datetime.timedelta(days=offset)
+        req = GetOptionContractsRequest(
+            underlying_symbols=[underlying],
+            status=AssetStatus.ACTIVE,
+            expiration_date=search_date,
+            type=ContractType.PUT
+        )
+        contracts = trading_client.get_option_contracts(req)
+        if contracts and contracts.option_contracts:
+            break
     
     if not contracts or not contracts.option_contracts:
-        print(f"[Error] No active put contracts found for {underlying} expiring on {target_expiry}")
+        print(f"[Error] No active put contracts found for {underlying} near {target_expiry} (checked ±2 days)")
         return None, None, (0.0, 0.0)
+    
+    if offset != 0:
+        print(f"  Exact expiry had no contracts; using {search_date} instead.")
     
     # Find closest strike
     closest = min(contracts.option_contracts, key=lambda c: abs(float(c.strike_price) - target_strike))
     strike = float(closest.strike_price)
     
     # We don't get quotes from contracts API, so return 0s — quotes fetched live during chasing
-    print(f"Found contract: {closest.symbol} (Strike: ${strike:.2f})")
+    print(f"Found contract: {closest.symbol} (Strike: ${strike:.2f}, Expiry: {search_date})")
     return closest.symbol, strike, (0.0, 0.0)
 
 # --- Helper: Submit Option Orders with Chasing ---
@@ -663,8 +672,6 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
         
         # Compute portfolio metrics
         portfolio_value = cash + shares_market_value + option_market_value
-        total_cost_basis = shares_cost_basis + option_cost_basis
-        total_invested = cash + total_cost_basis  # cost basis of current positions + cash
         
         shares_pl = shares_market_value - shares_cost_basis
         option_pl = option_market_value - option_cost_basis
@@ -718,9 +725,8 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
         report.append("")
         
         # --- Net P&L ---
-        port_pl_pct = (net_pl / total_invested * 100) if total_invested else 0
         report.append("**💵 NET PERFORMANCE**")
-        report.append(f"  **Net P&L: ${net_pl:+,.2f}** ({port_pl_pct:+.2f}%)")
+        report.append(f"  **Net P&L: ${net_pl:+,.2f}**")
         report.append(f"  **Portfolio Value: ${portfolio_value:,.2f}**")
         report.append("")
         
