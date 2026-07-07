@@ -83,18 +83,18 @@ def get_target_expiry(current_date):
         y_next += 1
     return get_third_friday(y_next, m_next)
 
-# --- Helper: Get Current VIX ---
-def get_current_vix():
-    print("Fetching VIX from yfinance...")
+# --- Helper: Get Current VXN (Nasdaq-100 Volatility) ---
+def get_current_vxn():
+    print("Fetching VXN (Nasdaq-100 Volatility) from yfinance...")
     try:
-        vix_ticker = yf.Ticker('^VIX')
+        vix_ticker = yf.Ticker('^VXN')
         hist = vix_ticker.history(period='1d')
         if not hist.empty:
             vix = float(hist['Close'].iloc[-1])
-            print(f"Current VIX Close: {vix:.2f}")
+            print(f"Current VXN Close: {vix:.2f}")
             return vix
     except Exception as e:
-        print(f"[Warning] Failed to fetch VIX: {e}. Falling back to 15.0")
+        print(f"[Warning] Failed to fetch VXN: {e}. Falling back to 15.0")
     return 15.0
 
 # --- Helper: Calculate Strike Percentage from VIX ---
@@ -430,7 +430,7 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
         print(f"Account Cash Balance: ${cash:,.2f}")
         
         # Fetch current VIX
-        vix = get_current_vix()
+        vix = get_current_vxn()
         
         # Check if today is a Roll Date (First trading day of the calendar month)
         today = datetime.date.today()
@@ -665,7 +665,7 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
                 else:
                     status_summary = "Hedge Value Normal"
                     print("Hedge ratio is normal. No crash reinvestment needed today.")
-                    report_details.append(f"🛡️ Put option multiplier: **{multiplier:.2f}x** (VIX: {vix:.2f}). No crash trigger today.")
+                    report_details.append(f"🛡️ Put option multiplier: **{multiplier:.2f}x** (VXN: {vix:.2f}). No crash trigger today.")
                     
         # --- SEND SUCCESS DISCORD REPORT ---
         emoji = "🧪" if dry_run else "🚀"
@@ -732,7 +732,7 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
         
         # --- Market Context ---
         report.append("**🌍 MARKET CONTEXT**")
-        report.append(f"  QQQM: **${spot:.2f}** | VIX: **{vix:.2f}**")
+        report.append(f"  QQQM: **${spot:.2f}** | VXN: **{vix:.2f}**")
         if shares_cost_basis:
             breakeven = (shares_cost_basis + option_cost_basis) / shares_held if shares_held else 0
             report.append(f"  Portfolio Breakeven: ${breakeven:.2f}/share")
