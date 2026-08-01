@@ -97,9 +97,18 @@ def get_current_vxn():
         print(f"[Warning] Failed to fetch VXN: {e}. Falling back to 15.0")
     return 15.0
 
-# --- Helper: Calculate Strike Percentage from VIX ---
+# --- Helper: Calculate Strike Percentage from VXN (Dynamic) ---
 def get_strike_pct(vix):
-    return 1.0  # ATM (user-elected Jun 25)
+    """Map VXN to a strike percentage of spot. Low vol → near ATM (tight), high vol → deeper OTM (cheap)."""
+    # Piecewise linear: VXN 18 → 0.97, VXN 30 → 0.94, VXN 40+ → 0.90
+    if vix <= 18:
+        return 0.97
+    elif vix <= 30:
+        return round(0.97 - (vix - 18) * (0.03 / 12.0), 2)  # 0.97 → 0.94
+    elif vix <= 40:
+        return round(0.94 - (vix - 30) * (0.04 / 10.0), 2)  # 0.94 → 0.90
+    else:
+        return 0.90
 
 # --- Helper: Option Chain Search (Workaround) ---
 def find_active_put_contract(trading_client, underlying, target_expiry, target_strike):
