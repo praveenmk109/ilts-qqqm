@@ -110,6 +110,19 @@ def get_strike_pct(vix):
     else:
         return 0.90
 
+# --- Helper: Get Mid Price of a Put Option ---
+def get_put_mid_price(data_client, symbol):
+    """Fetch the current mid-price of an option symbol, or None if unavailable."""
+    try:
+        req_quote = OptionLatestQuoteRequest(symbol_or_symbols=symbol)
+        res_quote = data_client.get_option_latest_quote(req_quote)
+        quote = res_quote.get(symbol)
+        if quote and quote.bid_price is not None and quote.ask_price is not None and quote.bid_price > 0 and quote.ask_price > 0:
+            return round((quote.bid_price + quote.ask_price) / 2.0, 2)
+    except Exception as e:
+        print(f"  [Warning] Failed to fetch quote for {symbol}: {e}")
+    return None
+
 # --- Helper: Option Chain Search (Workaround) ---
 def find_active_put_contract(trading_client, underlying, target_expiry, target_strike):
     """Query Alpaca option contracts API to find the closest PUT contract for target expiry and strike."""
@@ -724,6 +737,24 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
         if tracked_option_cost_basis:
             opt_pl_str += f" ({tracked_opt_pl/tracked_option_cost_basis*100:+.2f}%)"
         report.append(f"  Option P&L: {opt_pl_str}")
+        
+        # ATM what-if comparison
+        active_expiry = state.get("active_expiry")
+        if active_expiry and puts_held > 0:
+            try:
+                expiry_date = datetime.datetime.strptime(active_expiry, "%Y-%m-%d").date()
+                atm_symbol, atm_strike, _ = find_active_put_contract(
+                    trading_client, config.TARGET_SYMBOL, expiry_date, spot
+                )
+                if atm_symbol:
+                    atm_price = get_put_mid_price(option_data_client, atm_symbol)
+                    if atm_price:
+                        report.append(f"  🧪 **ATM what-if**: `{atm_symbol}` (${atm_strike:.0f}) → **${atm_price:.2f}** (vs ${tracked_opt_price_mid:.2f} OTM)")
+                        diff = atm_price - tracked_opt_price_mid
+                        report.append(f"  💰 OTM saving: **${diff:.2f}**/share ({diff*100:,.0f} total)")
+            except Exception as e:
+                print(f"  [Warning] ATM comparison failed: {e}")
+        report.append("")
         
         # Intrinsic value & hedge check
         intrinsic = max(0.0, state.get('active_strike', 0) - spot)
