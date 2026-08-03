@@ -5,7 +5,6 @@ import datetime
 import json
 import argparse
 import re
-import yfinance as yf
 
 # Add workspace directory to path to load config
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -87,10 +86,14 @@ def get_target_expiry(current_date):
 def get_current_vxn():
     print("Fetching VXN (Nasdaq-100 Volatility) from yfinance...")
     try:
-        vix_ticker = yf.Ticker('^VXN')
-        hist = vix_ticker.history(period='1d')
-        if not hist.empty:
-            vix = float(hist['Close'].iloc[-1])
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/%5EVXN?range=5d&interval=1d"
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        data = resp.json()
+        closes = data["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        closes = [c for c in closes if c is not None]
+        if closes:
+            vix = float(closes[-1])
             print(f"Current VXN Close: {vix:.2f}")
             return vix
     except Exception as e:
@@ -489,7 +492,12 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
                     old_put_revenue = old_put_qty * 100.0 * avg_sell_price
                     print(f"Closed puts. Estimated revenue added: ${old_put_revenue:.2f}")
                 else:
-                    print("[Warning] Failed to close old puts. Proceeding with cash calculations using mid-price...")
+                    if not dry_run:
+                        raise Exception(
+                            "Failed to sell old puts — aborting roll to avoid double position. "
+                            "State left unchanged; roll will retry next trading day."
+                        )
+                    print("[Warning] Failed to close old puts (dry-run). Proceeding with cash calculations using mid-price...")
                     old_put_revenue = old_put_qty * 100.0 * old_mid
             else:
                 print("No old puts to close.")
