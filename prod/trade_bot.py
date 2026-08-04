@@ -160,7 +160,7 @@ def find_active_put_contract(trading_client, underlying, target_expiry, target_s
     return closest.symbol, strike, (0.0, 0.0)
 
 # --- Helper: Submit Option Orders with Chasing ---
-def submit_option_order_with_chasing(trading_client, data_client, symbol, qty, side, max_attempts=3, dry_run=False):
+def submit_option_order_with_chasing(trading_client, data_client, symbol, qty, side, max_attempts=3, dry_run=False, time_budget=None):
     qty = int(qty)
     print(f"  [Option Order] Side: {side.value.upper()}, Qty: {qty}, Symbol: {symbol} (Dry-run: {dry_run})")
     if dry_run:
@@ -185,8 +185,13 @@ def submit_option_order_with_chasing(trading_client, data_client, symbol, qty, s
         return None
 
     total_seconds = (market_close - now).total_seconds()
+    if time_budget is not None:
+        total_seconds = min(total_seconds, time_budget)
+        if total_seconds <= 0:
+            print("  Time budget exhausted. Cannot trade.")
+            return None
     segment_seconds = total_seconds / max_attempts
-    print(f"  Market closes in {total_seconds:.0f}s. {max_attempts} segments of {segment_seconds:.0f}s each.")
+    print(f"  Market closes in {(market_close - now).total_seconds():.0f}s. {max_attempts} segments of {segment_seconds:.0f}s each.")
 
     spread_fractions = {1: 0.30, 2: 0.50, 3: 1.00}
     check_interval = 10
@@ -486,7 +491,8 @@ def execute_bot(dry_run=False, force_roll=False, force_crash=False):
                     old_mid = 0.0
                     
                 avg_sell_price = submit_option_order_with_chasing(
-                    trading_client, option_data_client, old_put_symbol, old_put_qty, OrderSide.SELL, dry_run=dry_run
+                    trading_client, option_data_client, old_put_symbol, old_put_qty, OrderSide.SELL,
+                    dry_run=dry_run, time_budget=600
                 )
                 if avg_sell_price:
                     old_put_revenue = old_put_qty * 100.0 * avg_sell_price
