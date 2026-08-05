@@ -297,6 +297,39 @@ def submit_option_order_with_chasing(trading_client, data_client, symbol, qty, s
         except Exception:
             pass
 
+    # Market-order fallback: paper engine needs crossing the spread to fill
+    if not dry_run:
+        if now < market_close:
+            print(f"  [Fallback] Limit chase failed — submitting MARKET {side.value.upper()} {qty} {symbol}.")
+            try:
+                market_req = MarketOrderRequest(
+                    symbol=symbol, qty=qty, side=side,
+                    time_in_force=TimeInForce.DAY,
+                    position_intent=PositionIntent.BUY_TO_OPEN if side == OrderSide.BUY else PositionIntent.SELL_TO_CLOSE
+                )
+                market_order = trading_client.submit_order(market_req)
+                deadline = datetime.datetime.now() + datetime.timedelta(seconds=30)
+                while datetime.datetime.now() < deadline:
+                    time.sleep(5)
+                    try:
+                        check = trading_client.get_order_by_id(market_order.id)
+                        if check.status == OrderStatus.FILLED:
+                            avg_price = float(check.filled_avg_price)
+                            print(f"  MARKET order FILLED at ${avg_price:.2f}")
+                            return avg_price
+                        if check.status == OrderStatus.CANCELED or check.status == OrderStatus.EXPIRED:
+                            print(f"  MARKET order {check.status.value}. Giving up.")
+                            break
+                    except Exception as e:
+                        print(f"  Failed to check market order status: {e}")
+                try:
+                    trading_client.cancel_order_by_id(market_order.id)
+                    print(f"  Cancelled leftover market order {market_order.id}")
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"  [Error] MARKET order fallback failed: {e}")
+
     print(f"  [Error] Failed to fill option order after {max_attempts} segments.")
     return None
 
