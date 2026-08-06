@@ -190,6 +190,8 @@ def submit_option_order_with_chasing(trading_client, data_client, symbol, qty, s
         if total_seconds <= 0:
             print("  Time budget exhausted. Cannot trade.")
             return None
+    fallback_reserve = 120
+    total_seconds = max(total_seconds - fallback_reserve, 1)
     segment_seconds = total_seconds / max_attempts
     print(f"  Market closes in {(market_close - now).total_seconds():.0f}s. {max_attempts} segments of {segment_seconds:.0f}s each.")
 
